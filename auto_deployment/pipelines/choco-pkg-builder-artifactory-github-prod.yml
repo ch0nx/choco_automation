@@ -1,0 +1,165 @@
+
+schedules:
+- cron: "0 * * * *"
+  displayName: Hourly package query/push
+  branches:
+    include:
+      - main
+  always: true
+
+pr: none
+
+trigger:
+  - main
+
+pool: aks-agent-pool-windows
+
+variables:
+- name: PackagePath
+  value: $(System.DefaultWorkingDirectory)\packages
+- name: OutputPath
+  value: $(System.DefaultWorkingDirectory)\upload
+- name: SourceUser
+  value: <artifactory-username-that-generated-PAT>
+- name: SourceName
+  value: Chocolatey
+- name: SourcePath
+  value: <full-uri-for-nuget-feed>
+- name: RetainCount
+  value: 3
+- name: RetainMonths
+  value: 3
+- name: Exclusions
+  value: 'chocolatey,citrix-vda,citrix-workspace'
+- name: AppID
+  value: '<entra application id>'
+- name: TenantID
+  value: '<azure tenant id>'
+- name: SubscriptionName
+  value: '<name-of-azure-subscription>'
+- name: StorageAcctName
+  value: '<name-of-azure-storage-account>'
+- name: StorageContainer
+  value: '<name-of-azure-blob-container>'
+- name: BlobUriBase
+  value: '<uri-for-blob-storage>'
+- name: PSRepositoryName
+  value: '<name-of-custom-powershell-repository>'
+- name: PSRepositoryURI
+  value: '<source-uri-of-powershell-repository>'
+- name: PSRepositoryURILocal
+  value: '<publishing-uri-of-powershell-repository>'
+- name: PSModuleList
+  value: 'choco-auto-packaging:latest'
+- name: RemoveDefaultPSRepository
+  value: true
+
+steps:
+- task: PowerShell@2
+  displayName: Configure PS repositories and install modules
+  inputs:
+    filePath: pipescripts/configure-poshEnv.ps1
+    workingDirectory: $(System.DefaultWorkingDirectory)
+    arguments: >-
+      -PSRepositoryName ${{ variables.PSRepositoryName }} -PSRepositoryURI ${{ variables.PSRepositoryURI }}
+      -PSRepositoryURILocal ${{ variables.PSRepositoryURILocal }} -RemoveDefaultPSRepository:$${{ variables.RemoveDefaultPSRepository }}
+      -PSModuleList '${{ variables.PSModuleList }}'
+
+- task: NuGetToolInstaller@1
+  inputs:
+    versionSpec: '*'
+
+- task: AzureKeyVault@2
+  name: AzureKeyVaultArtifactoryAPIKey
+  displayName: Retrieve Artifactory API Key from Azure KeyVault
+  inputs:
+    azureSubscription: '<azure-subscription-containing-keyvault>'
+    KeyVaultName: '<keyvault-name>'
+    SecretsFilter: '<list-of-secrets-to-retrieve>'
+    RunAsPreJob: true
+
+- task: Powershell@2
+  displayName: Kill nuget config
+  inputs:
+    targetType: 'inline'
+    script: |
+      $nugetConfig = "$($env:AppData)\NuGet\NuGet.Config"
+      if (test-path $nugetConfig){
+        write-output "Removing $nugetConfig"
+        remove-item $nugetConfig -force
+      }
+
+- task: Powershell@2
+  displayName: Install chocolatey and remove source
+  inputs:
+    targetType: 'inline'
+    script: |
+      $chocoPath = 'C:\ProgramData\chocolatey\choco.exe'
+      if (!(test-path $chocoPath)){
+        Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+      }
+      write-output $chocoPath
+      $lines = &$chocoPath source | Select-Object  -Skip 1
+      foreach ($line in $lines) {
+        $repo=($line -split ' - ',0,"simplematch")[0]
+        &$chocoPath source remove -n="$repo"
+      }
+
+- task: Powershell@2
+  displayName: Build Package List From NuGet
+  inputs:
+    targetType: 'inline'
+    script: |
+      $nuGetExe = Get-ChildItem "$(Agent.WorkFolder)\_tool\NuGet" -Filter "*nuget.exe" -recurse -File -force | sort FullName -Descending | select -first 1 -expand FullName
+      if (!$nuGetExe) {
+        throw "Unable to find NuGet exe file in '$(Agent.WorkFolder)\_tool\NuGet'"
+      } else {
+        Write-Output "NuGet Exe file found at $($nuGetExe)"
+      }
+      $nugetConfig = "$($env:AppData)\NuGet\NuGet.Config"
+      if (test-path $nugetConfig){
+        write-output "Removing $nugetConfig"
+        remove-item $nugetConfig -force
+      }
+      &$nuGetExe sources add -name ${{ variables.SourceName }} -Source ${{ variables.SourcePath }}
+      &$nuGetExe setapikey "${{ variables.SourceUser }}:$(<keyvault-secret-name-of-artifactory-token>)" -Source ${{ variables.SourceName }}
+      &$nuGetExe sources remove -name 'nuget.org'
+      &$nuGetExe sources list
+      Write-Output "Checking nuget list"
+      $packageList = &$nuGetExe list -source "${{ variables.SourceName }}" -NonInteractive -AllVersions
+      Write-Output "list done"
+      $packageList = $packageList -join ';'
+      Write-Output "##vso[task.setvariable variable=packageList]$packageList"
+      Write-Output "Current Package List value:"
+      $packageList
+- task: PowerShell@2
+  displayName: Pack New Versions And Delete Old Versions
+  env:
+    BLOB_ACCESSTOKEN: $(<keyvault-secret-name-of-azure-app-secret>)
+  inputs:
+    filePath: pipescripts/packageBuilder-Artifactory.ps1
+    arguments: >-
+      -PackagePath ${{ variables.PackagePath }} -PackageList $env:packageList
+      -RetainCount ${{ variables.RetainCount }} -RetainMonths ${{ variables.RetainMonths }}
+      -ArtifactoryToken $(<keyvault-secret-name-of-artifactory-token>) -Exclusions '${{ variables.Exclusions }}'
+      -OutputPath ${{ variables.OutputPath }} -TenantID '${{ variables.TenantID }}'
+      -AppID '${{ variables.AppID }}' -SubscriptionName '${{ variables.SubscriptionName }}'
+      -StorageAcctName '${{ variables.StorageAcctName }}' -StorageContainer '${{ variables.StorageContainer }}'
+      -BlobUriBase '${{ variables.BlobUriBase }}'
+- task: Powershell@2
+  displayName: Push nuget packages
+  inputs:
+    targetType: 'inline'
+    script: |
+      $nuGetExe = Get-ChildItem "$(Agent.WorkFolder)\_tool\NuGet" -Filter "*nuget.exe" -recurse -File -force | sort FullName -Descending | select -first 1 -expand FullName
+      $pkgPath = '${{ variables.OutputPath }}'
+      if (!(test-path $pkgPath)){
+        throw "No path found at $pkgPath"
+      } elseif (!(Get-ChildItem $pkgPath -Filter *.nupkg)) {
+        Write-Output "No packages to push"
+        return
+      }
+      &$nuGetExe sources list
+      # $pkgPush can be used for when you just want to push a single nupkg for testing
+      # $pkgPush = (Get-CHildItem $($pkgPath) -filter '*.nupkg' | select -first 1).FullName
+      &$nuGetExe push "$($pkgPath)\*.nupkg" -Source '${{ variables.SourceName }}' -SkipDuplicate -Verbosity detailed -NonInteractive

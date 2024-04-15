@@ -1,0 +1,80 @@
+# Linter runs on all branches as they upload
+# Assumes you have linting definitions at repo_root/.github/linters/powershell-psscriptanalyzer.psd1
+
+trigger:
+  branches:
+    include:
+      - '*'
+      - '*/**'
+
+pr:
+  - main
+
+variables:
+- name: PSCustomRules
+  value: $(System.DefaultWorkingDirectory)/.github/linters/powershell-psscriptanalyzer.psd1
+- name: FilePattern
+  value: '.*\.ps(m|)1$'
+
+
+jobs:
+  - job: posh_linter
+    pool: hosted-linux-runners
+    steps:
+      - checkout: self
+        fetchDepth: 0
+        clean: true
+        persistCredentials: true
+      - task: Bash@3
+        displayName: "Show File Structure"
+        inputs:
+          targetType: 'inline'
+          script: |
+              echo "Base directory"
+              pwd
+              ls -al
+          workingDirectory: $(System.DefaultWorkingDirectory)
+      - task: Bash@3
+        displayName: 'Get list of files changed in this branch'
+        inputs:
+          targetType: 'inline'
+          script: |
+            pwd
+            # Have to find the main branch name using this command because not all repos use the same name
+            mainBranch=$(git remote show origin | grep 'HEAD branch' | cut -d' ' -f5)
+            echo "Main branch name found: ${mainBranch}"
+            git fetch origin ${mainBranch}
+            changes=`git diff --diff-filter=d --name-only origin/${mainBranch}...`
+            echo "##vso[task.setvariable variable=ChangedFiles]${changes//$'\n'/';'}"
+            echo "${changes//$'\n'/';'}"
+          workingDirectory: $(System.DefaultWorkingDirectory)
+      - task: PowerShell@2
+        displayName: 'Run PSScriptAnalyzer'
+        condition: ne(variables.testEmpty, variables.ChangedFiles)
+        inputs:
+          targetType: 'inline'
+          showWarnings: true
+          script: |
+            $trimPattern = '\/azp\/_work\/\w+\/\w+\/<repo-name-containing-linter-file>\/'
+            $files = '$(ChangedFiles)' -split ';' | Where-Object {$_ -match '$(FilePattern)'}
+            $files = $files | Foreach-Object {Join-Path '$(System.DefaultWorkingDirectory)' $_ }
+            $results = $files | Invoke-ScriptAnalyzer -Settings '$(PSCustomRules)'
+            if ($results.Severity -contains 'Warning') {
+              Write-Output "##[warning]Warnings Detected:"
+              foreach ($result in $results | Where-Object {$_.Severity -eq 'Warning'} | Sort-Object ScriptName){
+                $relPath = $result.ScriptPath -replace $trimPattern
+                Write-Output "##vso[task.logissue type=warning;sourcepath=$relPath;linenumber=$($result.Line);columnnumber=$($result.Column)]$($result.RuleName): $($result.Message)"
+                $result | Format-List ScriptName,ScriptPath,Line,Column,RuleName,Message | Out-String
+              }
+              Write-Output "##vso[task.complete result=SucceededWithIssues;]"
+            }
+            if ($results.Severity -contains 'Error') {
+              Write-Output "##[error]Errors Detected:"
+              foreach ($result in $results | Where-Object {$_.Severity -eq 'Error'} | Sort-Object ScriptName){
+                $relPath = $result.ScriptPath -replace $trimPattern
+                Write-Output "##vso[task.logissue type=error;sourcepath=$relPath;linenumber=$($result.Line);columnnumber=$($result.Column)]$($result.RuleName): $($result.Message)"
+                $result | Format-List ScriptName,ScriptPath,Line,Column,RuleName,Message | Out-String
+              }
+              Write-Output "##vso[task.complete result=Failed;]"
+            }
+          workingDirectory: $(System.DefaultWorkingDirectory)

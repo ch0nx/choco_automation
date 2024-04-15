@@ -1,0 +1,341 @@
+
+schedules:
+- cron: "0 12 * * 1"
+  displayName: Package Update Query Mon at 0500 Pacific
+  branches:
+    include:
+      - main
+  always: true
+
+trigger: none
+pr: none
+pool: <agent pool name>
+
+# ADO pipelines dont support anything other than strings for variables, so for objects
+# we have to use parameters, which also allows runtime overrides for testing/targeting individual packages.
+# Evergreen properties vary across different applications, so various optional properties
+# are included here:
+# PackageName - Name of the package itself in Chocolatey, case sensitive.
+# GreenName - Name of the application in the Evergreen API: https://stealthpuppy.com/apptracker/
+# Vendor - Name of the company that produces the software, keep it lower case if at all possible.
+# ProductName - Name of the application, used for blob path, should be lower case.
+# BinaryType - exe or msi
+# BinaryArch - Architecture of the software to be retrieved, should almost always be x64
+# Stream - release stream, currently queries the 'stream', 'Ring', and 'Channel' properties from Evergreen API for this value
+# Release - Release property, like Enterprise or Consumer
+# Language - Language property, en-us, EN, etc
+# CustomMethod - Type of custom method to be used when querying/retrieving files, currently only supports 'Share'
+# CustomSharePath - For CustomMethod: Share, the UNC path of the share that contains the file to be retrieved
+# CustomFileName - Name of the file on the share to be queried, and also retrieved if not zipping
+# CustomZip - List of files inside the folder to zip, but currently only supports 'AllFiles' to grab the whole folder
+# CustomZipName - Name of the resulting zip file that will be uploaded
+# SkipDeletion - If using a custom injection that requires that a file be downloaded during the actual check method (like where auth is required),
+#                then leave the downloaded file alone in the check phase instead of deleting it.
+# VersionTransform - Set of two semicolon separated patterns to be used in the PowerShell '-replace' method.  The first pattern is
+#                    the one to be matched, the second is the one to replace with.
+# TeamName - Name of the ADO team that work items will be sent to
+# AreaPath - ADO Area Path for the team that work iteams will be sent to
+parameters:
+- name: packageList
+  type: object
+  default:
+    - PackageName: 'citrix-workspace'
+      GreenName: 'CitrixWorkspaceApp'
+      Vendor: 'citrix'
+      ProductName: 'workspace'
+      BinaryType: 'exe'
+      BinaryArch: 'x64'
+      Stream: 'LTSR'
+      TeamName: '<ADO Team Name>'
+      AreaPath: '<Full ADO Area Path to create work item in>'
+      ParentItem: <ADO Parent Item ID number to link work item to>
+    - PackageName: 'microsoft-edge'
+      GreenName: 'MicrosoftEdge'
+      Vendor: 'microsoft'
+      ProductName: 'edge'
+      BinaryType: 'msi'
+      BinaryArch: 'x64'
+      Stream: 'Stable'
+      Release: 'Enterprise'
+      TeamName: '<ADO Team Name>'
+      AreaPath: '<Full ADO Area Path to create work item in>'
+      ParentItem: <ADO Parent Item ID number to link work item to>
+    - PackageName: 'memcm'
+      GreenName: 'memcm'
+      Vendor: 'microsoft'
+      ProductName: 'memcm-agent'
+      BinaryType: 'exe'
+      CustomMethod: 'Share'
+      CustomSharePath: '<\\fileserver.fqdn.here\folder>'
+      CustomZip: AllFiles
+      CustomZipName: 'ccmsetup.zip'
+      CustomFileName: 'ccmsetup.exe'
+      TeamName: '<ADO Team Name>'
+      AreaPath: '<Full ADO Area Path to create work item in>'
+      ParentItem: <ADO Parent Item ID number to link work item to>
+    - PackageName: 'adobe-acrobat-reader-dc'
+      GreenName: 'AdobeAcrobatDC'
+      Vendor: 'adobe'
+      ProductName: 'adobe-acrobat-reader-dc'
+      BinaryType: 'ReaderMUI'
+      BinaryArch: 'x86,x64'
+      TeamName: '<ADO Team Name>'
+      AreaPath: '<Full ADO Area Path to create work item in>'
+      ParentItem: <ADO Parent Item ID number to link work item to>
+    - PackageName: 'microsoft-sql-server-management-studio'
+      GreenName: 'MicrosoftSsms'
+      Vendor: 'microsoft'
+      ProductName: 'ssms'
+      BinaryType: 'exe'
+      Language: 'English'
+      TeamName: '<ADO Team Name>'
+      AreaPath: '<Full ADO Area Path to create work item in>'
+      ParentItem: <ADO Parent Item ID number to link work item to>
+
+variables:
+- name: PackagePath
+  value: $(System.DefaultWorkingDirectory)\packages
+- name: RootDir
+  value: $(System.DefaultWorkingDirectory)
+- name: AppID
+  value: '<azure app id here>'
+- name: TenantID
+  value: '<azure tenant id here>'
+- name: SubscriptionName
+  value: '<azure subscription name here>'
+- name: StorageAcctName
+  value: '<blob storage account name here>'
+- name: StorageContainer
+  value: '<container name in blob storage account here>'
+- name: ShareUser
+  value: '<domain.fqdn.here\username>'
+- name: GithubURI
+  value: 'https://api.github.com/repos'
+- name: GitHubEndpoint
+  value: '<GitHub Org Name>'
+- name: PSRepositoryName
+  value: '<Name of Custom PS Repository>'
+- name: PSRepositoryURI
+  value: '<SourceLocation for Custom PS Repository>'
+- name: PSRepositoryURILocal
+  value: '<PublishLocation for Custom PS Repository>'
+- name: PSModuleList
+  value: 'Evergreen:latest,Nevergreen:latest,choco-auto-packaging:latest'
+- name: RemoveDefaultPSRepository
+  value: true
+
+steps:
+- checkout: self
+  persistCredentials: true
+
+- task: Powershell@2
+  displayName: "Configure git for pipeline"
+  inputs:
+    targetType: 'inline'
+    script: |
+        git config user.email adopipeline@yourdomain.com
+        git config user.name "ADO Pipeline"
+    workingDirectory: $(System.DefaultWorkingDirectory)
+
+- task: PowerShell@2
+  displayName: Configure PS repositories and install modules
+  inputs:
+    filePath: pipescripts/configure-poshEnv.ps1
+    workingDirectory: $(System.DefaultWorkingDirectory)
+    arguments: >-
+      -PSRepositoryName ${{ variables.PSRepositoryName }} -PSRepositoryURI ${{ variables.PSRepositoryURI }}
+      -PSRepositoryURILocal ${{ variables.PSRepositoryURILocal }} -RemoveDefaultPSRepository:$${{ variables.RemoveDefaultPSRepository }}
+      -PSModuleList '${{ variables.PSModuleList }}'
+
+- task: Powershell@2
+  displayName: "Inject custom retrieval scripts"
+  inputs:
+    targetType: 'inline'
+    script: |
+      $sourcePath = Join-Path $pwd.path 'pipescripts\neverevergreen\custom_injections'
+      $nevergreenPath = (get-module nevergreen -listavailable | select -first 1).modulebase
+      $nevergreenApps = join-path $nevergreenPath 'Apps'
+      if (!(Test-Path $nevergreenApps)) {
+        Write-Output "##vso[task.logissue type=error]No folder found for nevergreen at $nevergreenApps"
+        Write-Output "##vso[task.complete result=Failed;]"
+        return
+      }
+      $functions = (Get-ChildItem -Path $sourcePath -filter '*.ps1').FullName
+      foreach ($function in $functions) {
+        try {
+          Copy-Item -LiteralPath $function -Destination $nevergreenApps -Force -Confirm:$false
+        } catch {
+          Write-Output "##vso[task.logissue type=error]Error importing custom functions: $($_ | select-object * | Out-String)"
+          Write-Output "##vso[task.complete result=Failed;]"
+          return
+        }
+      }
+    workingDirectory: $(System.DefaultWorkingDirectory)
+
+- task: AzureKeyVault@2
+  displayName: Retrieve Necessary Credentials from Azure KeyVault
+  inputs:
+    azureSubscription: '<subscription key vault lives in>'
+    KeyVaultName: '<key vault name>'
+    SecretsFilter: |
+      <some secret name in keyvault>,
+      <some other secret name in keyvault>
+    RunAsPreJob: true
+
+- ${{ each package in parameters.packageList }}:
+  - task: Powershell@2
+    displayName: "Empty pipeline variables - ${{ package.PackageName }}"
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Output "##vso[task.setvariable variable=TemplateURI]$NULL"
+        Write-Output "##vso[task.setvariable variable=TemplateURI64]$NULL"
+        Write-Output "##vso[task.setvariable variable=FileURI]$NULL"
+        Write-Output "##vso[task.setvariable variable=FileName]$NULL"
+        Write-Output "##vso[task.setvariable variable=FileVersion]$NULL"
+        Write-Output "##vso[task.setvariable variable=FileHash]$NULL"
+        Write-Output "##vso[task.setvariable variable=FilePath]$NULL"
+        Write-Output "##vso[task.setvariable variable=ChocoPackagePath]$NULL"
+        Write-Output "##vso[task.setvariable variable=FileURI64]$NULL"
+        Write-Output "##vso[task.setvariable variable=FileName64]$NULL"
+        Write-Output "##vso[task.setvariable variable=FileHash64]$NULL"
+        Write-Output "##vso[task.setvariable variable=FilePath64]$NULL"
+        Write-Output "##vso[task.setvariable variable=PullRequestID]$NULL"
+        Write-Output "##vso[task.setvariable variable=PullRequestArtifactID]$NULL"
+        Write-Output "##vso[task.setvariable variable=PullRequestURL]$NULL"
+        Write-Output "##vso[task.setvariable variable=PullRequestBranchName]$NULL"
+        Write-Output "##vso[task.setvariable variable=WorkItemID]$NULL"
+        Write-Output "##vso[task.setvariable variable=QuerySucceeded]$true"
+        # Disconnect azure connections to ensure we have fresh auth
+        While (Disconnect-AzAccount) {
+          continue
+        }
+  - task: Powershell@2
+    displayName: "Get Download Info - ${{ package.PackageName }}"
+    continueOnError: true
+    env:
+      SHARE_USER: $(<keyvault secret name>)
+      SHARE_PASS: $(<keyvault secret name>)
+    inputs:
+      FilePath: pipescripts/neverevergreen/neverevergreen-check.ps1
+      arguments: >-
+        -RootDir '${{ variables.RootDir }}' -Package '${{ convertToJson(package) }}'
+        -PackagePath '${{ variables.PackagePath }}'
+
+  - task: Powershell@2
+    displayName: "Azure Operations - ${{ package.PackageName }}"
+    condition: and(ne(variables.testEmpty, variables.FilePath),eq(variables.QuerySucceeded, true))
+    continueOnError: true
+    env:
+      BLOB_ACCESSTOKEN: $(<keyvault secret name>)
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      GITHUB_TOKEN: $(<keyvault secret name>)
+      SHARE_USER: $(<keyvault secret name>)
+      SHARE_PASS: $(<keyvault secret name>)
+    inputs:
+      FilePath: pipescripts/neverevergreen/neverevergreen-gh-azure.ps1
+      arguments: >-
+        -WorkingDirectory '$(System.DefaultWorkingDirectory)' -Package '${{ convertToJson(package) }}'
+        -TenantID '${{ variables.TenantID }}' -AppID '${{ variables.AppID }}'
+        -SubscriptionName '${{ variables.SubscriptionName }}' -StorageAcctName '${{ variables.StorageAcctName }}'
+        -StorageContainer '${{ variables.StorageContainer }}' -CollectionURI '$(GithubURI)'
+        -RepoName '$(Build.Repository.Name)' -FilePath '$(FilePath)' -FileURI '$(FileURI)'
+        -FileVersion '$(FileVersion)' -FilePath64 '$(FilePath64)' -FileURI64 '$(FileURI64)'
+
+  - task: Powershell@2
+    displayName: "Git Operations - ${{ package.PackageName }}"
+    condition: ne(variables.testEmpty, variables.TemplateURI)
+    continueOnError: true
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      GITHUB_TOKEN: $(<keyvault secret name>)
+    inputs:
+      FilePath: pipescripts/neverevergreen/neverevergreen-gh-git.ps1
+      arguments: >-
+        -WorkingDirectory '$(System.DefaultWorkingDirectory)' -Package '${{ convertToJson(package) }}'
+        -SourceBranchName '$(Build.SourceBranchName)' -ChocoPackagePath '$(ChocoPackagePath)'
+        -CollectionURI '$(GithubURI)' -RepoName '$(Build.Repository.Name)'
+        -FileName '$(FileName)' -FileHash '$(FileHash)' -TemplateURI '$(TemplateURI)'
+        -FileVersion '$(FileVersion)' -FileName64 '$(FileName64)' -FileHash64 '$(FileHash64)'
+        -TemplateURI64 '$(TemplateURI64)'
+
+  - task: CreateWorkItem@2
+    displayName: "Create Work Item - ${{ package.PackageName }}"
+    condition: and(ne(variables.testEmpty, variables.PullRequestURL),ne(variables.testEmpty, variables.PullRequestID))
+    continueOnError: true
+    inputs:
+      teamProject: '<ADO Project Name>'
+      workItemType: 'User Story'
+      title: 'Pull Request Pending Review for ${{ package.PackageName }} version $(FileVersion)'
+      areaPath: "${{ package.AreaPath }}"
+      iterationPath: "${{ package.TeamName }}@currentIteration"
+      fieldMappings: 'Description=A pull request is pending approval by your team: $(PullRequestURL)'
+      authType: 'internal'
+      linkWorkItems: true
+      linkType: 'System.LinkTypes.Hierarchy-Reverse'
+      linkTarget: 'id'
+      targetId: "${{ package.ParentItem }}"
+      createOutputs: true
+      outputVariables: |
+        WorkItemID=ID
+
+  - task: Powershell@2
+    displayName: "Update pull request with work item link"
+    condition: ne(variables.testEmpty, variables.WorkItemID)
+    continueOnError: true
+    env:
+      GITHUB_TOKEN: $(<keyvault secret name>)
+    inputs:
+      targetType: 'inline'
+      script: |
+        # Retrieve pull request so that we can append to the original body and then update the pull request
+        # so that the ADO work item is linked in it.
+        try {
+          Import-Module 'choco-auto-packaging' -Force
+        } catch {
+          Write-Output "##vso[task.logissue type=Error]Unable to import modules: $($_ | Out-String)"
+          Write-Output "##vso[task.complete result=Failed;]"
+          return
+        }
+        $prTest = Test-GitHubPullRequest -OrgURI "$(GithubURI)" -RepoName '$(Build.Repository.Name)' `
+          -SourceBranch $(PullRequestBranchName) -TargetBranch 'main' -GitHubToken $env:GITHUB_TOKEN
+        Write-Output "PR Test data:"
+        $prTest.Values | Select-Object *
+        if (!$prTest) {
+          throw "No data returned from pull request query"
+          exit
+        }
+        $requestBody = @{
+          body = $prTest.Values.Body + "`nADO Work item: AB#$(WorkItemID)"
+        }
+        $requestBody = $requestBody | ConvertTo-JSON
+        try {
+          $updateResult = Update-GitHubPullRequest -OrgURI "$(GithubURI)" -RepoName '$(Build.Repository.Name)' `
+            -PullRequestID '$(PullRequestID)' -RequestBody $requestBody -RESTMethod 'PATCH' `
+            -GitHubToken $env:GITHUB_TOKEN
+        } catch {
+          Write-Output "##vso[task.logissue type=error]Error updating pull request:`n$($_ | Select-Object * | Out-String)"
+          Write-Output "##vso[task.complete result=Failed;]"
+          exit
+        }
+        Write-Output "Updated Pull Request Info:"
+        $updateResult | Select-Object *
+      workingDirectory: $(System.DefaultWorkingDirectory)
+
+- task: Powershell@2
+  displayName: "Remove PS Repository before ending"
+  condition: always()
+  inputs:
+    targetType: 'inline'
+    script: |
+      $repoCheck = Get-PSRepository | Where-Object {$_.Name -eq '$(PSRepositoryName)'}
+      if ($repoCheck) {
+        try {
+          $repoCheck | Unregister-PSRepository -ErrorAction 'Stop'
+        } catch {
+          Write-Output @("##vso[task.logissue type=error]Unable to remove PS Repository.",
+              "`nError info:`n$($_ | Select-Object * | Out-String)")
+          Write-Output "##vso[task.complete result=Failed;]"
+        }
+      }
+

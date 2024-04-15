@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2010/07/nuspec.xsd">
+    <metadata>
+        <!-- REQUIRED FIELDS -->
+        <!-- Identifier that must be unique within the hosting gallery -->
+        <id>template-exe-package</id>
+        <!-- Package version number that is used when resolving dependencies -->
+        <!-- Package version number must be INCREASED each time or packages will not update! -->
+        <version>1.2.3</version>
+        <!--
+            The description can be used in package manager UI. Note that the
+            nuget.org gallery uses information you add in the portal.
+        -->
+        <description>Core utility functions for web applications</description>
+        <!-- Authors contain text that appears directly on the gallery -->
+        <authors>Wei Shi Lindon Arelius, Dross</authors>
+        <!-- Dependencies are automatically installed when the package is installed -->
+        <!-- <dependencies> -->
+        <!--     <dependency id="filefetch.extension"/> -->
+        <!-- </dependencies> -->
+        <!-- END REQUIRED FIELDS -->
+        <!-- OPTIONAL FIELDS, delete if unused -->
+        <!-- Any details about this particular release -->
+        <releaseNotes>Bug fixes and performance improvements</releaseNotes>
+        <!-- Copyright information -->
+        <copyright>Copyright ©2016 Contoso Corporation</copyright>
+        <!-- Tags appear in the gallery and can be used for tag searches -->
+        <tags>windows citrix epic test</tags>
+        <!-- END OPTIONAL FIELDS -->
+    </metadata>
+</package>
